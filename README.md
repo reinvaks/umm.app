@@ -1,25 +1,32 @@
-# 🎈 Blank app template
+# Nord Pool UMM Dashboard
 
-A simple Streamlit app template for you to modify!
+Streamlit dashboard for current Nord Pool REMIT Urgent Market Messages.
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-template.streamlit.app/)
+## Architecture
 
-### How to run it on your own machine
+1. Streamlit first reads `https://ummapi.nordpoolgroup.com/messages` directly.
+2. If the direct call fails, the app automatically reads `data/umm.json`.
+3. GitHub Actions refreshes that snapshot every 15 minutes.
+4. A failed/empty fetch never overwrites the last successful snapshot.
 
-Prerequisite: install `uv` if you don't already have it.
+No ENTSO-E token is required for Nord Pool UMM reading.
 
+## Deploy
+
+1. Push these files to a GitHub repository.
+2. In GitHub: **Settings → Actions → General → Workflow permissions → Read and write permissions**.
+3. Run **Actions → Update Nord Pool UMM snapshot → Run workflow** once.
+4. Confirm that `data/umm.json` was committed.
+5. In Streamlit Community Cloud create an app from the repository; entry point: `umm.app.py`.
+
+## Local test
+
+```bash
+pip install -r requirements.txt
+python fetch_snapshot.py
+streamlit run umm.app.py
 ```
-$ curl -LsSf https://astral.sh/uv/install.sh | sh
-```
 
-1. Sync the dependencies
+## Diagnostics
 
-   ```
-   $ uv sync
-   ```
-
-2. Run the app
-
-   ```
-   $ uv run streamlit run streamlit_app.py
-   ```
+The Streamlit UI shows live HTTP status/error details under **Andmeallika diagnostika**. This is intentional: network/API failures must not be swallowed silently.
