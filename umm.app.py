@@ -110,14 +110,21 @@ df = df.sort_values(["publication_time", "event_start"], ascending=False, na_pos
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Teateid", len(df))
-c2.metric("Katkestatud MW", f"{pd.to_numeric(df['unavailable_capacity'], errors='coerce').sum(skipna=True):,.0f}")
+# Backward compatibility for older GitHub snapshots created before affected_capacity existed.
+if "affected_capacity" not in df.columns:
+    unavailable = pd.to_numeric(df.get("unavailable_capacity"), errors="coerce")
+    installed = pd.to_numeric(df.get("installed_capacity"), errors="coerce")
+    available = pd.to_numeric(df.get("available_capacity"), errors="coerce")
+    df["affected_capacity"] = unavailable.fillna(installed - available)
+
+c2.metric("Mõjutatav võimsus", f"{pd.to_numeric(df['affected_capacity'], errors='coerce').sum(skipna=True):,.0f} MW")
 c3.metric("Viimane avaldamine", df["publication_time"].max().strftime("%Y-%m-%d %H:%M UTC") if df["publication_time"].notna().any() else "—")
 
 st.subheader("Teated")
 display_cols = [
     "publication_time", "event_start", "event_end", "area", "message_type",
-    "market_participant", "asset_name", "fuel_type", "available_capacity",
-    "unavailable_capacity", "reason", "source_url",
+    "market_participant", "asset_name", "fuel_type", "affected_capacity",
+    "installed_capacity", "available_capacity", "unavailable_capacity", "reason", "source_url",
 ]
 st.dataframe(
     df[display_cols],
@@ -132,8 +139,10 @@ st.dataframe(
         "market_participant": "Turuosaline",
         "asset_name": "Vara / seade",
         "fuel_type": "Kütus",
+        "affected_capacity": st.column_config.NumberColumn("Mõjutatav võimsus MW", format="%.0f"),
+        "installed_capacity": st.column_config.NumberColumn("Installeeritud MW", format="%.0f"),
         "available_capacity": st.column_config.NumberColumn("Saadaval MW", format="%.0f"),
-        "unavailable_capacity": st.column_config.NumberColumn("Puudu MW", format="%.0f"),
+        "unavailable_capacity": st.column_config.NumberColumn("Raporteeritud unavailable MW", format="%.0f"),
         "reason": "Põhjus / märkus",
         "source_url": st.column_config.LinkColumn("UMM"),
     },

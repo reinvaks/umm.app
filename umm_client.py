@@ -74,16 +74,112 @@ def _iso(value: Any) -> str:
     return s.replace("Z", "+00:00")
 
 
-def _first_number(obj: dict[str, Any], *paths: str) -> float | None:
-    value = _get_nested(obj, *paths)
-    if value is None:
-        return None
+def _to_number(value: Any) -> float | None:
     if isinstance(value, dict):
         value = value.get("value") or value.get("amount") or value.get("quantity")
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _first_number(obj: dict[str, Any], *paths: str) -> float | None:
+    return _to_number(_get_nested(obj, *paths))
+
+
+def _recursive_values(obj: Any, key_names: set[str]) -> list[Any]:
+    """Collect values for matching keys anywhere in an API message.
+
+    Nord Pool messages may contain segmented capacity profiles, so capacity fields
+    are not guaranteed to be at the JSON root.
+    """
+    found: list[Any] = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key.lower() in key_names:
+                found.append(value)
+            found.extend(_recursive_values(value, key_names))
+    elif isinstance(obj, list):
+        for item in obj:
+            found.extend(_recursive_values(item, key_names))
+    return found
+
+
+def _recursive_numbers(obj: Any, *key_names: str) -> list[float]:
+    keys = {k.lower() for k in key_names}
+    nums: list[float] = []
+    for value in _recursive_values(obj, keys):
+        n = _to_number(value)
+        if n is not None:
+            nums.append(n)
+    return nums
+
+
+def _capacity_summary(m: dict[str, Any]) -> tuple[float | None, float | None, float | None, float | None, list[dict[str, float | None]]]:
+    """Return installed, available, unavailable, affected and capacity profile.
+
+    Affected capacity is reported unavailable capacity where available. If the
+    message only provides installed and available capacity, affected capacity is
+    derived as installed - available. For segmented messages the maximum affected
+    capacity is used as the headline value.
+    """
+    installed_values = _recursive_numbers(m, "installedCapacity", "installed_capacity")
+    available_values = _recursive_numbers(m, "availableCapacity", "available_capacity")
+    unavailable_values = _recursive_numbers(m, "unavailableCapacity", "unavailable_capacity")
+
+    installed = max(installed_values) if installed_values else None
+    available = min(available_values) if available_values else None
+    unavailable = max(unavailable_values) if unavailable_values else None
+
+    affected = unavailable
+    if affected is None and installed is not None and available is not None:
+        diff = installed - available
+        if diff >= 0:
+            affected = diff
+
+    # Best-effort profile extraction: identify nested dicts containing capacity data.
+    profile: list[dict[str, float | None]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            keys_lower = {str(k).lower(): k for k in node.keys()}
+            has_capacity = any(k in keys_lower for k in {
+                "installedcapacity", "availablecapacity", "unavailablecapacity",
+                "installed_capacity", "available_capacity", "unavailable_capacity",
+            })
+            if has_capacity:
+                inst = _to_number(node.get(keys_lower.get("installedcapacity", keys_lower.get("installed_capacity", ""))))
+                avail = _to_number(node.get(keys_lower.get("availablecapacity", keys_lower.get("available_capacity", ""))))
+                unavail = _to_number(node.get(keys_lower.get("unavailablecapacity", keys_lower.get("unavailable_capacity", ""))))
+                aff = unavail
+                if aff is None and inst is not None and avail is not None and inst >= avail:
+                    aff = inst - avail
+                profile.append({
+                    "installed_capacity": inst,
+                    "available_capacity": avail,
+                    "unavailable_capacity": unavail,
+                    "affected_capacity": aff,
+                })
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(m)
+
+    # Deduplicate identical profile rows while preserving order.
+    unique_profile: list[dict[str, float | None]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for row in profile:
+        key = tuple(row.get(k) for k in (
+            "installed_capacity", "available_capacity", "unavailable_capacity", "affected_capacity"
+        ))
+        if key not in seen:
+            seen.add(key)
+            unique_profile.append(row)
+
+    return installed, available, unavailable, affected, unique_profile
 
 
 def normalize_message(m: dict[str, Any]) -> dict[str, Any]:
@@ -98,6 +194,8 @@ def normalize_message(m: dict[str, Any]) -> dict[str, Any]:
     event_type = _text(_get_nested(m, "eventType", "messageType", "type", "event.type", "unavailabilityType"))
     status = _text(_get_nested(m, "eventStatus", "status", "messageStatus"))
     reason = _text(_get_nested(m, "reason", "reasonText", "remarks", "remark", "description", "messageText", "event.reason"))
+
+    installed, available, unavailable, affected, capacity_profile = _capacity_summary(m)
 
     link = UMM_UI
     if message_id:
@@ -117,9 +215,11 @@ def normalize_message(m: dict[str, Any]) -> dict[str, Any]:
         "asset_name": _text(asset),
         "area": _text(area),
         "fuel_type": _text(fuel),
-        "installed_capacity": _first_number(m, "installedCapacity", "capacity.installed", "asset.installedCapacity"),
-        "unavailable_capacity": _first_number(m, "unavailableCapacity", "capacity.unavailable", "unavailable", "event.unavailableCapacity"),
-        "available_capacity": _first_number(m, "availableCapacity", "capacity.available", "available", "event.availableCapacity"),
+        "installed_capacity": installed,
+        "available_capacity": available,
+        "unavailable_capacity": unavailable,
+        "affected_capacity": affected,
+        "capacity_profile": capacity_profile,
         "reason": reason,
         "source_url": link,
         "source": "Nord Pool UMM",
@@ -155,7 +255,7 @@ def fetch_umm_messages(limit: int = 1000, max_pages: int = 5, retries: int = 3) 
     session = requests.Session()
     session.headers.update({
         "Accept": "application/json",
-        "User-Agent": "NordPool-UMM-Dashboard/1.0 (+https://github.com/)",
+        "User-Agent": "NordPool-UMM-Dashboard/1.1 (+https://github.com/)",
     })
 
     all_items: list[dict[str, Any]] = []
@@ -217,7 +317,6 @@ def fetch_umm_messages(limit: int = 1000, max_pages: int = 5, retries: int = 3) 
             break
 
     normalized = [normalize_message(x) for x in all_items]
-    # Deduplicate by id+version; preserve messages without id by raw JSON signature.
     seen = set()
     unique = []
     for row in normalized:
