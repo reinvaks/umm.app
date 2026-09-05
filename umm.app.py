@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import re
 
 st.set_page_config(
-    page_title="Baltikumi ja Põhjamaade UMM / REMIT Teated",
+    page_title="Baltikumi ja Põhjamaade Ametlikud UMM / REMIT Teated",
     page_icon="⚡",
     layout="wide",
 )
@@ -16,7 +16,7 @@ st.write(
     "Reaalajas ühendus Euroopa läbipaistvuse platvormiga (Generation & Transmission Unavailability)."
 )
 
-# Kontrollime Streamliti secrets'eid
+# Tokeni lugemine Streamliti secrets'idest
 saved_token = ""
 try:
     saved_token = st.secrets.get("ENTSOE_API_KEY", "")
@@ -28,13 +28,12 @@ api_key = st.sidebar.text_input(
     "Sisesta ENTSO-E API token:",
     value=saved_token,
     type="password",
-    help="Tasuta tokeni saad luua lehel transparency.entsoe.eu (register -> My Account -> API token)."
+    help="Tasuta tokeni saad lehel transparency.entsoe.eu"
 )
 
 st.sidebar.markdown("---")
 st.sidebar.header("Filtreerimisvalikud")
-only_last_week = st.sidebar.checkbox("Näita ainult viimase nädala teateid", value=True)
-use_fallback_if_empty = st.sidebar.checkbox("Näita näidisandmeid, kui reaalajas andmeid pole", value=True)
+days_back = st.sidebar.slider("Vaata viimase N päeva teateid:", min_value=7, max_value=90, value=30)
 
 DOMAINS = {
     "Eesti (EE)": "10Y1001A1001A39I",
@@ -66,7 +65,7 @@ def fetch_entsoe_outages(token, domain_code, start_date, end_date):
     
     entries = []
     
-    # Dokumentide tüübid: A80 (Production), A77 (Transmission)
+    # A80 = Generation Unavailability, A77 = Transmission Unavailability
     for doc_type in ["A80", "A77"]:
         if doc_type == "A80":
             req_url = f"{url}?securityToken={token}&documentType={doc_type}&biddingZone_Domain={domain_code}&periodStart={period_start}&periodEnd={period_end}"
@@ -80,12 +79,8 @@ def fetch_entsoe_outages(token, domain_code, start_date, end_date):
                 
                 if "<Reason>" in raw_data and "<text>" in raw_data:
                     match = re.search(r'<text>(.*?)</text>', raw_data)
-                    if match:
-                        reason_text = match.group(1)
-                        if "No matching data found" in reason_text:
-                            continue
-                        else:
-                            return f"ENTSO-E viga: {reason_text}"
+                    if match and "No matching data found" in match.group(1):
+                        continue
                 
                 clean_xml = remove_namespaces(raw_data)
                 root = ET.fromstring(clean_xml)
@@ -93,7 +88,6 @@ def fetch_entsoe_outages(token, domain_code, start_date, end_date):
                 for time_series in root.findall(".//TimeSeries"):
                     m_id = time_series.findtext("mID") or time_series.findtext("identification") or "Teadmata ID"
                     
-                    # Otsime põhjalikumalt kõiki tekstivälju
                     reasons = [r.text for r in time_series.findall(".//Reason/text") if r.text]
                     reason_str = " | ".join(reasons) if reasons else "Hooldustöö / ülekandekatkestus"
                     
@@ -101,13 +95,18 @@ def fetch_entsoe_outages(token, domain_code, start_date, end_date):
                     end_t = time_series.findtext(".//timeInterval/end")
                     
                     entry_title = f"{'Tootmisseade' if doc_type=='A80' else 'Ülekandeliin'} ({m_id[:10]})"
-                    entries.append({
-                        "Pealkiri": entry_title,
-                        "Avaldatud": start_t.replace("T", " ")[:16] if start_t else "Teadmata",
-                        "Lopp": end_t.replace("T", " ")[:16] if end_t else "Teadmata",
-                        "Kirjeldus": reason_str,
-                        "Link": "https://transparency.entsoe.eu/"
-                    })
+                    
+                    # Väldime duplikaate
+                    if not any(e['ID'] == m_id and e['Algus'] == (start_t.replace("T", " ")[:16] if start_t else "") for e in entries):
+                        entries.append({
+                            "ID": m_id,
+                            "Tüüp": "Tootmine" if doc_type=='A80' else "Ülekanne",
+                            "Pealkiri": entry_title,
+                            "Algus": start_t.replace("T", " ")[:16] if start_t else "Teadmata",
+                            "Lopp": end_t.replace("T", " ")[:16] if end_t else "Teadmata",
+                            "Kirjeldus": reason_str,
+                            "Link": "https://transparency.entsoe.eu/"
+                        })
         except Exception:
             continue
             
@@ -117,53 +116,25 @@ if not api_key:
     st.warning("Palun sisesta külgribale oma ENTSO-E API token.")
 else:
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=30) if not only_last_week else end_date - timedelta(days=7)
+    start_date = end_date - timedelta(days=days_back)
     
     all_entries = []
-    error_message = None
-    
-    with st.spinner("Laen andmeid ENTSO-E platvormilt..."):
+    with st.spinner("Laen reaalajas andmeid ENTSO-E platvormilt..."):
         for name in selected_domains:
             code = DOMAINS[name]
             results = fetch_entsoe_outages(api_key, code, start_date, end_date)
-            
-            if isinstance(results, str):
-                error_message = results
-                break
             for r in results:
                 r["Piirkond"] = name
                 all_entries.append(r)
                 
-    if error_message:
-        st.error(f"⚠️ {error_message}")
-    elif not all_entries and use_fallback_if_empty:
-        st.info("ℹ️ Valitud perioodil ei tagastanud ENTSO-E API aktiivseid teateid. Kuvatakse viimased teadaolevad turuteated:")
-        # Fallback andmed, et vaade oleks alati täidetud ja testitav
-        all_entries = [
-            {
-                "Pealkiri": "Estlink 2 annual maintenance",
-                "Avaldatud": "2026-09-05 09:00",
-                "Lopp": "2026-09-08 18:00",
-                "Kirjeldus": "Planned annual maintenance work reducing transfer capacity between Estonia and Finland.",
-                "Link": "https://transparency.entsoe.eu/",
-                "Piirkond": "Eesti (EE)"
-            },
-            {
-                "Pealkiri": "Forsmark 3 nuclear power reduction",
-                "Avaldatud": "2026-09-05 07:30",
-                "Lopp": "2026-09-07 12:00",
-                "Kirjeldus": "Power output reduced due to valve maintenance in the secondary circuit.",
-                "Link": "https://transparency.entsoe.eu/",
-                "Piirkond": "Rootsi SE3"
-            }
-        ]
-
-    if all_entries:
+    if not all_entries:
+        st.info(f"Valitud perioodil ({days_back} päeva) ei leitud ENTSO-E andmebaasist aktiivseid teateid valitud piirkondade jaoks. Proovi ajaperioodi laiendada.")
+    else:
         df = pd.DataFrame(all_entries)
-        st.subheader(f"Leitud ametlikud teated ({len(df)})")
+        st.subheader(f"Leitud ametlikud reaalajas teated ({len(df)})")
         
         for index, row in df.iterrows():
-            with st.expander(f"📌 [{row['Piirkond']}] {row['Pealkiri']} (Alates: {row['Avaldatud']})"):
-                st.markdown(f"**Kehtivus:** `{row['Avaldatud']}` kuni `{row['Lopp']}`")
-                st.write(f"**Sisu:** {row['Kirjeldus']}")
+            with st.expander(f"📌 [{row['Piirkond']}] {row['Tüüp']} — {row['Algus']} kuni {row['Lopp']}"):
+                st.markdown(f"**Teade:** `{row['Pealkiri']}`")
+                st.write(f"**Kirjeldus:** {row['Kirjeldus']}")
                 st.markdown(f"[Vaata ENTSO-E platvormilt]({row['Link']})")
