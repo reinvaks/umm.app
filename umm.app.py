@@ -74,7 +74,8 @@ def fetch_real_entsoe_data(token, domain_code, start_date, end_date):
         ("A77", f"in_Domain={domain_code}&out_Domain={domain_code}")
     ]
     
-    for doc_type, param_str    req_url = f"{url}?securityToken={token}&documentType={doc_type}&{param_str}&periodStart={p_start}&periodEnd={p_end}"
+    for doc_type, param_str in queries:
+        req_url = f"{url}?securityToken={token}&documentType={doc_type}&{param_str}&periodStart={p_start}&periodEnd={p_end}"
         
         try:
             req = urllib.request.Request(req_url, headers={"User-Agent": "Mozilla/5.0"})
