@@ -1,15 +1,5 @@
-import sys
-import subprocess
-
-# Tagab automaatse teekide olemasolu pilvekeskkonnas
-for package in ["streamlit", "pandas", "feedparser", "requests"]:
-    try:
-        __import__(package)
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-import feedparser
-import pandas as pd
+import urllib.request
+import xml.etree.ElementTree as ET
 import streamlit as st
 
 st.set_page_config(
@@ -27,20 +17,29 @@ st.write(
 @st.cache_data(ttl=600)
 def load_umm_data():
   rss_url = "https://umm.nordpoolgroup.com/rss"
+  entries = []
   try:
-    feed = feedparser.parse(rss_url)
-    entries = []
-    for entry in feed.entries:
-      entries.append({
-          "Pealkiri": entry.get("title", "Pole pealkirja"),
-          "Avaldatud": entry.get("published", "Teadmata"),
-          "Link": entry.get("link", "#"),
-          "Kirjeldus": entry.get("summary", ""),
-          "Piirkond": "Nord Pool",
-      })
-    return pd.DataFrame(entries)
+    req = urllib.request.Request(rss_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=10) as response:
+      xml_data = response.read()
+      root = ET.fromstring(xml_data)
+      for item in root.findall(".//item"):
+        title = item.find("title")
+        pub_date = item.find("pubDate")
+        link = item.find("link")
+        description = item.find("description")
+
+        entries.append({
+            "Pealkiri": title.text if title is not None else "Pole pealkirja",
+            "Avaldatud": pub_date.text if pub_date is not None else "Teadmata",
+            "Link": link.text if link is not None else "#",
+            "Kirjeldus": (
+                description.text if description is not None else ""
+            ),
+            "Piirkond": "Nord Pool",
+        })
   except Exception:
-    data = [
+    entries = [
         {
             "Pealkiri": "Planned maintenance on Estlink 2",
             "Avaldatud": "2026-09-05 10:00",
@@ -56,29 +55,18 @@ def load_umm_data():
             "Piirkond": "SE3",
         },
     ]
-    return pd.DataFrame(data)
+  return entries
 
 
-df = load_umm_data()
+entries = load_umm_data()
 
-st.sidebar.header("Filtreerimine")
-if not df.empty and "Piirkond" in df.columns:
-  regions = st.sidebar.multiselect(
-      "Vali piirkonnad:",
-      options=df["Piirkond"].unique(),
-      default=df["Piirkond"].unique(),
-  )
-  filtered_df = df[df["Piirkond"].isin(regions)]
+st.subheader(f"Leitud teated ({len(entries)})")
+
+if not entries:
+  st.info("Teateid ei leitud.")
 else:
-  filtered_df = df
-
-st.subheader(f"Leitud teated ({len(filtered_df)})")
-
-if filtered_df.empty:
-  st.info("Valitud filtritele vastavaid teateid ei leitud.")
-else:
-  for index, row in filtered_df.iterrows():
+  for row in entries:
     with st.expander(f"📌 {row['Pealkiri']} ({row.get('Avaldatud', '')})"):
       st.write(row.get("Kirjeldus", "Kirjeldus puudub."))
-      if "Link" in row and row["Link"] != "#":
+      if row.get("Link") and row["Link"] != "#":
         st.markdown(f"[Ava Nord Pool UMM platvormil]({row['Link']})")
