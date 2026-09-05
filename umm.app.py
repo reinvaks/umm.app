@@ -1,3 +1,13 @@
+import sys
+import subprocess
+
+# Tagab automaatse teekide olemasolu pilvekeskkonnas
+for package in ["streamlit", "pandas", "feedparser", "requests"]:
+    try:
+        __import__(package)
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
 import feedparser
 import pandas as pd
 import streamlit as st
