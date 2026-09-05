@@ -52,7 +52,6 @@ selected_domains = st.sidebar.multiselect(
 )
 
 def remove_namespaces(xml_string):
-    """Eemaldab XML-st nimeruumid, et ElementTree suudaks neid veatult lugeda"""
     xml_string = re.sub(r'\s+xmlns(?::\w+)?="[^"]*"', '', xml_string)
     xml_string = re.sub(r'<(/?)[\w-]+:', r'<\1', xml_string)
     return xml_string
@@ -64,11 +63,9 @@ def fetch_entsoe_outages(token, domain_code, start_date, end_date):
     period_start = start_date.strftime("%Y%m%d0000")
     period_end = end_date.strftime("%Y%m%d2359")
     
-    # Päring nii tootmisseadmete (A80) kui ka ülekandeliinide (A77) jaoks
     entries = []
     
     for doc_type in ["A80", "A77"]:
-        # A80 kasutab biddingZone_Domain, A77 in_Domain
         param_name = "biddingZone_Domain" if doc_type == "A80" else "in_Domain"
         req_url = f"{url}?securityToken={token}&documentType={doc_type}&{param_name}={domain_code}&periodStart={period_start}&periodEnd={period_end}"
         
@@ -77,11 +74,16 @@ def fetch_entsoe_outages(token, domain_code, start_date, end_date):
             with urllib.request.urlopen(req, timeout=15) as response:
                 raw_data = response.read().decode('utf-8')
                 
-                # Kui ENTSO-E tagastab veateate (nt vigane token)
+                # Kui ENTSO-E tagastab veateate
                 if "<Reason>" in raw_data and "<text>" in raw_data:
                     match = re.search(r'<text>(.*?)</text>', raw_data)
                     if match:
-                        return f"ENTSO-E viga: {match.group(1)}"
+                        reason_text = match.group(1)
+                        # Kui tegemist on lihtsalt teatega, et andmeid polnud, pole see viga vaid tühi tulemus
+                        if "No matching data found" in reason_text:
+                            continue
+                        else:
+                            return f"ENTSO-E viga: {reason_text}"
                 
                 clean_xml = remove_namespaces(raw_data)
                 root = ET.fromstring(clean_xml)
@@ -92,7 +94,6 @@ def fetch_entsoe_outages(token, domain_code, start_date, end_date):
                     start_t = time_series.findtext(".//timeInterval/start")
                     end_t = time_series.findtext(".//timeInterval/end")
                     
-                    # Väldime duplikaatide lisamist samale ID-le
                     entry_title = f"{'Tootmisseade' if doc_type=='A80' else 'Ülekandeliin'} ({m_id[:10]})"
                     if not any(e['Pealkiri'] == entry_title and e['Avaldatud'] == (start_t.replace("T", " ")[:16] if start_t else "") for e in entries):
                         entries.append({
@@ -102,7 +103,7 @@ def fetch_entsoe_outages(token, domain_code, start_date, end_date):
                             "Kirjeldus": reason,
                             "Link": "https://transparency.entsoe.eu/"
                         })
-        except Exception as e:
+        except Exception:
             continue
             
     return entries
@@ -130,7 +131,6 @@ else:
                 
     if error_message:
         st.error(f"⚠️ {error_message}")
-        st.info("Kui näed teadet, et token ei kehti või pole aktiveeritud, kontrolli, kas oled ENTSO-E lehelt oma meili teel saadetud kinnituslingile klikkinud.")
     elif not all_entries:
         st.info("Valitud perioodil ja piirkondades aktiivseid teateid ei leitud.")
     else:
