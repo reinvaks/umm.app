@@ -2,6 +2,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import streamlit as st
 import pandas as pd
+from datetime import datetime, timedelta
 
 st.set_page_config(
     page_title="Baltikumi ja Põhjamaade UMM Teated",
@@ -14,11 +15,8 @@ st.write(
     "Reaalajas ülevaade tootmisseadmete, ülekandeliinide ja võrgukatkestuste teadetest."
 )
 
-# Andmete laadimise funktsioon koos reaalsemate struktuursete väljadega
 @st.cache_data(ttl=600)
 def load_market_messages():
-    # Siin saab integreerida ENTSO-E API või Nord Pooli struktureeritud voo.
-    # Toome näitena professionaalselt struktureeritud andmekogumi, mis jaguneb Baltikumi ja Põhjamaade vahel.
     data = [
         {
             "Pealkiri": "Estlink 2 annual maintenance and capacity reduction",
@@ -59,21 +57,24 @@ def load_market_messages():
         {
             "Piirkond": "LV",
             "Pealkiri": "Pļaviņas HPP maintenance works",
-            "Avaldatud": "2026-09-03 16:45",
+            "Avaldatud": "2026-08-25 16:45",
             "Tüüp": "Generation",
             "Staatus": "Active",
             "Kirjeldus": "Unit 4 scheduled overhaul.",
             "Link": "https://umm.nordpoolgroup.com",
         }
     ]
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    df["Avaldatud_dt"] = pd.to_datetime(df["Avaldatud"])
+    return df
 
 df = load_market_messages()
 
-# Külgriba filtrid
 st.sidebar.header("Filtreerimisvalikud")
 
-# Piirkondade valik
+# Viimase nädala filter vaikimisi aktiivne
+only_last_week = st.sidebar.checkbox("Näita ainult viimase nädala teateid", value=True)
+
 all_regions = sorted(df["Piirkond"].unique())
 selected_regions = st.sidebar.multiselect(
     "Vali hinnapiirkonnad / riigid:",
@@ -81,7 +82,6 @@ selected_regions = st.sidebar.multiselect(
     default=all_regions,
 )
 
-# Teate tüübi valik
 all_types = sorted(df["Tüüp"].unique())
 selected_types = st.sidebar.multiselect(
     "Vali teate tüüp:",
@@ -89,11 +89,20 @@ selected_types = st.sidebar.multiselect(
     default=all_types,
 )
 
-# Filtreerimine
-filtered_df = df[
-    df["Piirkond"].isin(selected_regions) & 
-    df["Tüüp"].isin(selected_types)
+# Filtreerimise rakendamine
+filtered_df = df.copy()
+
+if only_last_week:
+    one_week_ago = pd.Timestamp.now() - pd.Timedelta(days=7)
+    filtered_df = filtered_df[filtered_df["Avaldatud_dt"] >= one_week_ago]
+
+filtered_df = filtered_df[
+    filtered_df["Piirkond"].isin(selected_regions) & 
+    filtered_df["Tüüp"].isin(selected_types)
 ]
+
+# Sorteerime uuemad teated ülespoole
+filtered_df = filtered_df.sort_values(by="Avaldatud_dt", ascending=False)
 
 st.subheader(f"Leitud teated ({len(filtered_df)})")
 
@@ -103,7 +112,7 @@ else:
     for index, row in filtered_df.iterrows():
         status_color = "🔴" if row["Staatus"] == "Active" else "🟢"
         with st.expander(f"{status_color} [{row['Piirkond']}] {row['Pealkiri']} ({row['Avaldatud']})"):
-            st.markdown(**Tüüp:** `{row['Tüüp']}` | **Staatus:** `{row['Staatus']}`")
+            st.markdown(f"**Tüüp:** `{row['Tüüp']}` | **Staatus:** `{row['Staatus']}`")
             st.write(row["Kirjeldus"])
             if row["Link"] != "#":
                 st.markdown(f"[Ava ametlikul platvormil]({row['Link']})")
