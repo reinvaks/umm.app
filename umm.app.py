@@ -1,7 +1,9 @@
+import urllib.request
+import xml.etree.ElementTree as ET
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, timezone
-from entsoe import EntsoePandasClient
+import re
 
 st.set_page_config(
     page_title="Baltikumi ja Põhjamaade Ametlikud UMM / REMIT Teated",
@@ -11,10 +13,10 @@ st.set_page_config(
 
 st.title("⚡ Baltikumi ja Põhjamaade Ametlikud Turuteated (ENTSO-E / REMIT)")
 st.write(
-    "Reaalajas ühendus Euroopa läbipaistvuse platvormiga ametliku `entsoe-py` raamistiku kaudu."
+    "Reaalajas ühendus Euroopa läbipaistvuse platvormiga (Generation & Transmission Unavailability)."
 )
 
-# Tokeni lugemine Streamliti secrets'idest või vaikeväärtusest
+# Tokeni lugemine Streamliti secrets'idest
 saved_token = ""
 try:
     saved_token = st.secrets.get("ENTSOE_API_KEY", "")
@@ -33,83 +35,103 @@ st.sidebar.markdown("---")
 st.sidebar.header("Filtreerimisvalikud")
 days_back = st.sidebar.slider("Vaata viimase N päeva teateid:", min_value=7, max_value=90, value=30)
 
-# entsoe-py toetab standardseid riigikode (EIC lühendeid)
-COUNTRIES = {
-    "Eesti (EE)": "EE",
-    "Läti (LV)": "LV",
-    "Leedu (LT)": "LT",
-    "Soome (FI)": "FI",
-    "Rootsi (SE_3)": "SE_3",
-    "Rootsi (SE_4)": "SE_4",
-    "Norra (NO_1)": "NO_1"
+DOMAINS = {
+    "Eesti (EE)": "10Y1001A1001A39I",
+    "Läti (LV)": "10YLV-1001A074V",
+    "Leedu (LT)": "10YLT-1001A000Q",
+    "Soome (FI)": "10YFI-1--------U",
+    "Rootsi (SE3)": "10YSE-1--------M",
+    "Rootsi (SE4)": "10YSE-2--------Z",
+    "Norra (NO1)": "10YNO-1--------2",
 }
 
-selected_countries = st.sidebar.multiselect(
+selected_domains = st.sidebar.multiselect(
     "Vali piirkonnad:",
-    options=list(COUNTRIES.keys()),
-    default=list(COUNTRIES.keys())
+    options=list(DOMAINS.keys()),
+    default=list(DOMAINS.keys())
 )
 
+def remove_namespaces(xml_string):
+    xml_string = re.sub(r'\s+xmlns(?::\w+)?="[^"]*"', '', xml_string)
+    xml_string = re.sub(r'<(/?)[\w-]+:', r'<\1', xml_string)
+    return xml_string
+
 @st.cache_data(ttl=900)
-def fetch_entsoe_data(token, country_code, start_date, end_date):
-    client = EntsoePandasClient(api_key=token)
-    records = []
+def fetch_entsoe_outages(token, domain_code, start_date, end_date):
+    url = "https://web-api.tp.entsoe.eu/api"
     
-    # 1. Tootmisseadmete katkestused (Generation Unavailability)
-    try:
-        gen_df = client.query_unavailability_generation(country_code, start=start_date, end=end_date, dayahead=False)
-        if gen_df is not None and not gen_df.empty:
-            for idx, row in gen_df.iterrows():
-                records.append({
-                    "Tüüp": "Tootmine",
-                    "Algus": str(row.get('start', idx)),
-                    "Lopp": str(row.get('end', '')),
-                    "Kirjeldus": str(row.get('summary', row.get('description', 'Tootmiskatkestus'))),
-                    "Link": "https://transparency.entsoe.eu/"
-                })
-    except Exception:
-        pass
+    period_start = start_date.strftime("%Y%m%d%H%M")
+    period_end = end_date.strftime("%Y%m%d%H%M")
+    
+    entries = []
+    
+    # Pärime nii tootmisseadmete (A80) kui ülekandeliinide (A77) katkestusi
+    for doc_type in ["A80", "A77"]:
+        if doc_type == "A80":
+            req_url = f"{url}?securityToken={token}&documentType={doc_type}&biddingZone_Domain={domain_code}&periodStart={period_start}&periodEnd={period_end}"
+        else:
+            req_url = f"{url}?securityToken={token}&documentType={doc_type}&in_Domain={domain_code}&out_Domain={domain_code}&periodStart={period_start}&periodEnd={period_end}"
         
-    # 2. Ülekandeliinide katkestused (Transmission Unavailability)
-    try:
-        trans_df = client.query_unavailability_transmission(country_code, country_code, start=start_date, end=end_date)
-        if trans_df is not None and not trans_df.empty:
-            for idx, row in trans_df.iterrows():
-                records.append({
-                    "Tüüp": "Ülekanne",
-                    "Algus": str(row.get('start', idx)),
-                    "Lopp": str(row.get('end', '')),
-                    "Kirjeldus": str(row.get('summary', row.get('description', 'Ülekandekatkestus'))),
-                    "Link": "https://transparency.entsoe.eu/"
-                })
-    except Exception:
-        pass
-        
-    return records
+        try:
+            req = urllib.request.Request(req_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                raw_data = response.read().decode('utf-8')
+                
+                if "<Reason>" in raw_data and "<text>" in raw_data:
+                    match = re.search(r'<text>(.*?)</text>', raw_data)
+                    if match and "No matching data found" in match.group(1):
+                        continue
+                
+                clean_xml = remove_namespaces(raw_data)
+                root = ET.fromstring(clean_xml)
+                
+                for time_series in root.findall(".//TimeSeries"):
+                    m_id = time_series.findtext("mID") or time_series.findtext("identification") or "Teadmata ID"
+                    
+                    reasons = [r.text for r in time_series.findall(".//Reason/text") if r.text]
+                    reason_str = " | ".join(reasons) if reasons else "Hooldustöö / katkestus"
+                    
+                    start_t = time_series.findtext(".//timeInterval/start")
+                    end_t = time_series.findtext(".//timeInterval/end")
+                    
+                    entry_title = f"{'Tootmisseade' if doc_type=='A80' else 'Ülekandeliin'} ({m_id[:10]})"
+                    
+                    entries.append({
+                        "Tüüp": "Tootmine" if doc_type=='A80' else "Ülekanne",
+                        "Pealkiri": entry_title,
+                        "Algus": start_t.replace("T", " ")[:16] if start_t else "Teadmata",
+                        "Lopp": end_t.replace("T", " ")[:16] if end_t else "Teadmata",
+                        "Kirjeldus": reason_str,
+                        "Link": "https://transparency.entsoe.eu/"
+                    })
+        except Exception:
+            continue
+            
+    return entries
 
 if not api_key:
-    st.warning("Palun sisesta külgribale oma ENTSO-E API token (või seadista see Streamliti Secrets alla).")
+    st.warning("Palun sisesta külgribale oma ENTSO-E API token (või salvesta see Streamliti Secrets alla).")
 else:
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days_back)
     
-    all_data = []
-    with st.spinner("Laen ametlikke andmeid ENTSO-E platvormilt..."):
-        for country_label in selected_countries:
-            code = COUNTRIES[country_label]
-            data = fetch_entsoe_data(api_key, code, start_date, end_date)
-            for item in data:
-                item["Piirkond"] = country_label
-                all_data.append(item)
+    all_entries = []
+    with st.spinner("Laen ametlikke reaalajas andmeid ENTSO-E platvormilt..."):
+        for name in selected_domains:
+            code = DOMAINS[name]
+            results = fetch_entsoe_outages(api_key, code, start_date, end_date)
+            for r in results:
+                r["Piirkond"] = name
+                all_entries.append(r)
                 
-    if not all_data:
-        st.info(f"Valitud ajavahemikus ({days_back} päeva) ei leidnud ENTSO-E nendest piirkondadest aktiivseid REMIT-teateid. Proovi suurendada päevaakent külgribal.")
+    if not all_entries:
+        st.info(f"Valitud ajavahemikus ({days_back} päeva) ei leidnud ENTSO-E nendest piirkondadest aktiivseid teateid. Proovi suurendada päevaakent külgribal (nt 60 või 90 päeva).")
     else:
-        df = pd.DataFrame(all_data)
+        df = pd.DataFrame(all_entries)
         st.subheader(f"Leitud ametlikud reaalajas teated ({len(df)})")
         
         for index, row in df.iterrows():
-            with st.expander(f"📌 [{row['Piirkond']}] {row['Tüüp']} | Alates: {row['Algus'][:16]}"):
-                st.markdown(f"**Kehtivus kuni:** `{row['Lopp'][:16]}`")
+            with st.expander(f"📌 [{row['Piirkond']}] {row['Tüüp']} | Alates: {row['Algus']}"):
+                st.markdown(f"**Teade:** `{row['Pealkiri']}` | **Kehtivus kuni:** `{row['Lopp']}`")
                 st.write(f"**Kirjeldus:** {row['Kirjeldus']}")
                 st.markdown(f"[Vaata ENTSO-E platvormilt]({row['Link']})")
